@@ -8,7 +8,7 @@ import {
   Flex,
   CloseButton,
   Button,
-  Textarea,
+  TextInput,
   Group,
 } from "@mantine/core";
 import { CodeHighlight } from "@mantine/code-highlight";
@@ -72,12 +72,26 @@ export const NodeModal = ({ opened, onClose }: ModalProps) => {
   const setContents = useFile(state => state.setContents);
 
   const [isEditing, setIsEditing] = React.useState(false);
-  const [editedValue, setEditedValue] = React.useState("");
+  const [editedFields, setEditedFields] = React.useState<Record<string, string>>({});
 
   React.useEffect(() => {
     if (opened && nodeData) {
-      const normalized = normalizeNodeData(nodeData.text);
-      setEditedValue(normalized);
+      // Initialize fields from node data
+      const fields: Record<string, string> = {};
+
+      if (nodeData.text.length === 1 && !nodeData.text[0].key) {
+        // Single primitive value
+        fields["value"] = String(nodeData.text[0].value ?? "");
+      } else {
+        // Object with key-value pairs
+        nodeData.text.forEach(row => {
+          if (row.key && row.type !== "array" && row.type !== "object") {
+            fields[row.key] = String(row.value ?? "");
+          }
+        });
+      }
+
+      setEditedFields(fields);
       setIsEditing(false);
     }
   }, [opened, nodeData]);
@@ -88,18 +102,70 @@ export const NodeModal = ({ opened, onClose }: ModalProps) => {
 
   const handleCancel = () => {
     if (nodeData) {
-      setEditedValue(normalizeNodeData(nodeData.text));
+      // Reset fields to original values
+      const fields: Record<string, string> = {};
+
+      if (nodeData.text.length === 1 && !nodeData.text[0].key) {
+        fields["value"] = String(nodeData.text[0].value ?? "");
+      } else {
+        nodeData.text.forEach(row => {
+          if (row.key && row.type !== "array" && row.type !== "object") {
+            fields[row.key] = String(row.value ?? "");
+          }
+        });
+      }
+
+      setEditedFields(fields);
     }
     setIsEditing(false);
   };
 
+  const handleFieldChange = (key: string, value: string) => {
+    setEditedFields(prev => ({ ...prev, [key]: value }));
+  };
+
   const handleSave = () => {
     try {
-      // Strictly parse as JSON - no fallbacks
-      const parsedValue = JSON.parse(editedValue);
-
       const currentJson = getJson();
       const path = nodeData?.path;
+
+      let parsedValue: any;
+
+      // Handle single primitive value
+      if (nodeData?.text.length === 1 && !nodeData.text[0].key) {
+        const rawValue = editedFields["value"];
+        // Try to parse as JSON to detect numbers, booleans, null
+        try {
+          parsedValue = JSON.parse(rawValue);
+        } catch {
+          // If parsing fails, treat as string
+          parsedValue = rawValue;
+        }
+      } else {
+        // Get the current value at this path to preserve nested structures
+        const currentData = JSON.parse(currentJson);
+        let currentValue = currentData;
+
+        // Navigate to the current value at the path
+        if (path && path.length > 0) {
+          for (const segment of path) {
+            currentValue = currentValue[segment];
+          }
+        }
+
+        // Start with the current value to preserve nested objects/arrays
+        parsedValue = { ...currentValue };
+
+        // Only update the primitive fields that were edited
+        Object.entries(editedFields).forEach(([key, value]) => {
+          // Try to parse each value
+          try {
+            parsedValue[key] = JSON.parse(value);
+          } catch {
+            parsedValue[key] = value;
+          }
+        });
+      }
 
       // Update JSON at the specific path
       const updatedJson = updateJsonAtPath(currentJson, path, parsedValue);
@@ -109,6 +175,9 @@ export const NodeModal = ({ opened, onClose }: ModalProps) => {
 
       toast.success("Value updated successfully");
       setIsEditing(false);
+
+      // Close the modal
+      onClose();
 
       // Re-select the node by matching its path after graph updates
       setTimeout(() => {
@@ -123,9 +192,52 @@ export const NodeModal = ({ opened, onClose }: ModalProps) => {
         }
       }, 50);
     } catch (error) {
-      toast.error("Invalid JSON. Please enter valid JSON syntax.");
-      console.error("JSON parse error:", error);
+      toast.error("Failed to update value. Please check your input.");
+      console.error("Update error:", error);
     }
+  };
+
+  const renderEditableFields = () => {
+    if (!nodeData) return null;
+
+    const isSingleValue = nodeData.text.length === 1 && !nodeData.text[0].key;
+
+    if (isSingleValue) {
+      return (
+        <TextInput
+          label="Value"
+          value={editedFields["value"] || ""}
+          onChange={e => handleFieldChange("value", e.currentTarget.value)}
+          styles={{
+            input: {
+              fontFamily: "monospace",
+              fontSize: "12px",
+            },
+          }}
+        />
+      );
+    }
+
+    return (
+      <Stack gap="xs">
+        {nodeData.text
+          .filter(row => row.key && row.type !== "array" && row.type !== "object")
+          .map(row => (
+            <TextInput
+              key={row.key}
+              label={row.key || ""}
+              value={editedFields[row.key!] || ""}
+              onChange={e => handleFieldChange(row.key!, e.currentTarget.value)}
+              styles={{
+                input: {
+                  fontFamily: "monospace",
+                  fontSize: "12px",
+                },
+              }}
+            />
+          ))}
+      </Stack>
+    );
   };
 
   return (
@@ -139,20 +251,11 @@ export const NodeModal = ({ opened, onClose }: ModalProps) => {
             <CloseButton onClick={onClose} />
           </Flex>
           {isEditing ? (
-            <Textarea
-              value={editedValue}
-              onChange={e => setEditedValue(e.currentTarget.value)}
-              minRows={4}
-              maxRows={10}
-              autosize
-              styles={{
-                input: {
-                  fontFamily: "monospace",
-                  fontSize: "12px",
-                },
-              }}
-              w={600}
-            />
+            <ScrollArea.Autosize mah={400} maw={600}>
+              <Stack gap="md" miw={350} p="xs">
+                {renderEditableFields()}
+              </Stack>
+            </ScrollArea.Autosize>
           ) : (
             <ScrollArea.Autosize mah={250} maw={600}>
               <CodeHighlight
